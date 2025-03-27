@@ -1,10 +1,11 @@
 package response_test
 
 import (
-	"jr_response/response"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/JuniorVieira99/jr_goresponse/response"
 
 	"github.com/JuniorVieira99/jr_httpcodes/codes"
 )

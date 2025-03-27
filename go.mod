@@ -1,4 +1,4 @@
-module jr_response
+module github.com/JuniorVieira99/jr_goresponse
 
 go 1.21
 

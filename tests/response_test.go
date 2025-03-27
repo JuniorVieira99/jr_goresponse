@@ -2,10 +2,10 @@ package response_test
 
 import (
 	"bytes"
-	"jr_response/response"
 	"strings"
 	"testing"
 
+	"github.com/JuniorVieira99/jr_goresponse/response"
 	"github.com/JuniorVieira99/jr_httpcodes/codes"
 )
 

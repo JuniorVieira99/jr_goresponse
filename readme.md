@@ -5,6 +5,14 @@
 
 A comprehensive Go library for handling HTTP responses in a structured and thread-safe way. This library provides utilities for creating, parsing, manipulating, and analyzing HTTP response data.
 
+## Overview
+
+This library have three main structs:
+
+- `Response`: Represents an HTTP response with metadata such as URL, host, method, status code, headers, body, body length, and the raw response.
+- `ResponsePack`: Represents a collection of `Response` objects, with support for concurrent access and metadata.
+- `CompressResponsePack`: Represents a collection of compressed `Response` objects, with support for concurrent access and metadata.
+
 ## Features
 
 - **Structured Response Handling**: Represent HTTP responses with comprehensive metadata
@@ -36,6 +44,8 @@ go get github.com/JuniorVieira99/jr_httpcodes
 ### Creating a Response
 
 ```go
+// *NOTE*: For more detailed explanation of methods check docs
+
 import (
     "github.com/JuniorVieira99/jr_httpcodes/codes"
     "github.com/JuniorVieira99/response_lib/response"
@@ -46,17 +56,15 @@ body := []byte(`{"message":"Hello"}`)
 
 // Create a response directly
 resp, err := response.NewResponse(
-    "https://example.com",      // URL
-    "example.com",              // Host
-    codes.GET,                  // Method
-    codes.OK,                   // Status code
-    headers,                    // Headers
-    body,                       // Body
-    19,                         // Body length
+    "https://example.com",       // URL
+    "example.com",               // Host
+    codes.GET,                   // Method
+    codes.OK,                    // Status code
+    headers,                     // Headers
+    body,                        // Body
+    19,                          // Body length
+    []byte(`HTTP/1.1 200 OK....`), // Raw response
 )
-if err != nil {
-    // Handle error
-}
 
 // Create a response from configuration
 config := response.ConfigResponse{
@@ -67,6 +75,7 @@ config := response.ConfigResponse{
     Headers:    map[string]string{"Content-Type": "application/json"},
     Body:       []byte(`{"message":"Hello"}`),
     BodyLength: 19,
+    RawResponse: []byte(`HTTP/1.1 200 OK....`),
 }
 resp, err := response.NewResponseFromConfig(config)
 if err != nil {
@@ -83,6 +92,7 @@ Content-Length: 19
 
 {"message":"Hello"}`)
 
+// This will create a response struct directly from a raw response
 resp, err := response.ParseRawHTTPResponse(&rawData, "https://example.com")
 if err != nil {
     // Handle error
@@ -104,6 +114,9 @@ if err != nil {
 ### Working with Response Collections
 
 ```go
+
+// *NOTE*: For more detailed explanation of methods check docs
+
 // Create a response pack
 pack := response.NewResponsePack()
 
@@ -111,13 +124,17 @@ pack := response.NewResponsePack()
 pack.AddResponse(resp1)
 pack.AddResponse(resp2)
 
-// Calculate statistics
+// Could also responses in batches
+responses := []*response.Response{resp1, resp2}
+pack.BatchAddResponse(responses)
+
+// Calculate statistics, then use ToString() or Print() to display
 pack.Calculate()
 
 // Get a specific response
 resp := pack.GetResponse("https://example.com")
 
-// Get all keys
+// Get all keys, which are the URLs of the responses
 keys := pack.GetKeysOfResponses()
 
 // Get error report
@@ -169,6 +186,31 @@ fmt.Println(packStr)
 
 // Or print directly
 pack.Print()
+```
+
+### Compressing Response Pack
+
+```go
+// *NOTE*: For more detailed explanation of methods check docs
+
+// Create a compress response pack
+compressPack := response.NewCompressResponsePack()
+
+// Add responses, the responses will be automatically compressed
+compressPack.AddResponse(resp1)
+compressPack.AddResponse(resp2)
+compressPack.AddResponse(resp3)
+
+// You could also add responses in batch
+responses := []*response.Response{resp1, resp2, resp3}
+compressPack.BatchAddResponse(responses)
+
+// Get a specific response, the response will be automatically decompressed
+resp := compressPack.GetResponse("https://example.com")
+
+// Also, allows for batch get
+urls := []string{"https://example.com/api1", "https://example.com/api2"}
+responses := compressPack.BatchGetResponse(urls)
 ```
 
 ## Thread Safety
@@ -234,6 +276,52 @@ Not Found`)
     errorReport, _ := pack.GetErrorReportString()
     fmt.Println("\nError Report:")
     fmt.Println(errorReport)
+}
+```
+
+## Complete Example: Parsing and Compressing HTTP Responses
+
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/JuniorVieira99/response_lib/response"
+)
+
+func main() {
+    // Create a response pack
+    pack := response.NewResponsePack()
+    
+    // Parse some raw HTTP responses
+    rawResp1 := []byte(`HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 19
+
+{"message":"Hello"}`)
+    
+    rawResp2 := []byte(`HTTP/1.1 404 Not Found
+Content-Type: text/plain
+Content-Length: 9
+
+Not Found`)
+    
+    // Parse and add responses
+    resp1, _ := response.ParseRawHTTPResponse(&rawResp1, "https://example.com/api1")
+    resp2, _ := response.ParseRawHTTPResponse(&rawResp2, "https://example.com/api2")
+
+    // Create a compress response pack
+    compressPack := response.NewCompressResponsePack()
+
+    // Add responses
+    compressPack.AddResponse(resp1)
+    compressPack.AddResponse(resp2)
+
+    // Get a specific response
+    resp := compressPack.GetResponse("https://example.com/api1")
+
+    // Check response
+    resp.IsSuccessful()
 }
 ```
 

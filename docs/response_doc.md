@@ -15,6 +15,8 @@ The response object is a struct representing the response from the server. It co
   - [ReadBody](#readbody)
   - [ReadRawResponse](#readrawresponse)
   - [Print](#print)
+  - [IsSuccessful](#issuccessful)
+  - [DetailedStatusCode](#detailedstatuscode)
   - [ToReadableJSON](#toreadablejson)
   - [ToJSON](#tojson)
   - [Compress](#compress)
@@ -79,6 +81,22 @@ func (r *Response) Print()
 ```
 
 Prints a string representation of the Response struct to the console.
+
+### IsSuccessful
+
+Checks if the response status code is in the 200-299 range.
+
+```go
+func (r *Response) IsSuccessful() bool
+```
+
+### DetailedStatusCode
+
+Returns a detailed description of the status code.
+
+```go
+func (r *Response) DetailedStatusCode() string
+```
 
 ### ToReadableJSON
 

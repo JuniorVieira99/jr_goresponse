@@ -123,6 +123,17 @@ func (r *Response) ReadBody() string {
 	return string(r.Body)
 }
 
+// IsSuccessful checks if the response status code indicates a successful HTTP response.
+// It returns true if the status code is within the range of success codes, otherwise false.
+func (r *Response) IsSuccessful() bool {
+	return codes.IsSuccess(r.StatusCode)
+}
+
+// DetailedStatusCode returns the StatusCode as a human-readable string, e.g. "OK" instead of 200.
+func (r *Response) DetailedStatusCode() string {
+	return r.StatusCode.String()
+}
+
 // ReadRawResponse returns the raw response data as a string.
 func (r *Response) ReadRawResponse() string {
 	return string(r.RawResponse)
