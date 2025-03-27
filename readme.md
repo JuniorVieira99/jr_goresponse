@@ -28,7 +28,7 @@ This library have three main structs:
 ## Installation
 
 ```bash
-go get github.com/JuniorVieira99/response_lib
+go get github.com/JuniorVieira99/jr_goresponse
 ```
 
 ## Dependencies
