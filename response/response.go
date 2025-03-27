@@ -1,36 +1,61 @@
-// Package response provides utilities for handling HTTP responses in a structured way.
+// Package response provides functionality for handling HTTP responses, including creating,
+// parsing, and managing collections of responses.
 //
-// The package offers types and functions to create, manipulate, and analyze HTTP response
-// data. It includes the core Response struct for individual HTTP responses and ResponsePack
-// for managing collections of responses with thread-safe operations.
+// The package includes:
+// - Response: A struct representing a single HTTP response with methods for manipulation.
+// - ResponsePack: A thread-safe collection of Response objects with statistics tracking.
+// - CompressResponsePack: A memory-efficient collection of compressed Response objects.
 //
-// The package supports:
-// - Creating responses from raw HTTP data or structured configurations
-// - Converting responses to and from JSON format
-// - Thread-safe storage and retrieval of multiple responses
-// - Statistics calculation for response success/failure rates
-// - Parsing raw HTTP response data
+// These components are designed to work with the jr_httpcodes/codes package for HTTP methods
+// and status codes, making it easy to work with HTTP responses in a standardized way.
 //
-// Core types:
-// - Response: Represents a single HTTP response with method, status, headers, and body
-// - ResponsePack: Thread-safe collection of responses with aggregated statistics
-// - ConfigResponse: Configuration structure for creating new Response instances
+// ResponsePack and CompressResponsePack provide concurrent-safe operations for adding,
+// retrieving, and managing sets of Response objects, with CompressResponsePack offering
+// lower memory usage through gzip compression.
 //
-// This package is designed to work with the codes package for HTTP method and status code
-// validation and handling.
+// Basic usage examples:
+//
+//	// Create a single response
+//	resp, err := response.NewResponse(
+//	    "https://example.com/api",
+//	    "example.com",
+//	    codes.GET,
+//	    codes.OK,
+//	    map[string]string{"Content-Type": "application/json"},
+//	    []byte(`{"status":"success"}`),
+//	    0,
+//	    nil,
+//	)
+//
+//	// Create a response pack and add responses
+//	pack := response.NewResponsePack()
+//	pack.AddResponse(resp)
+//
+//	// Retrieve and print information
+//	retrievedResp := pack.GetResponse("https://example.com/api")
+//	retrievedResp.Print()
+//
+//	// Parse raw HTTP response
+//	rawData := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>...</html>")
+//	parsedResp, err := response.ParseRawHTTPResponse(&rawData, "https://example.com")
 package response
 
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	urlPack "net/url"
-	"request_comp/codes"
+	"runtime"
 	"strings"
 	"sync"
+	"unicode/utf8"
+
+	"github.com/JuniorVieira99/jr_httpcodes/codes"
 )
 
 // Response struct
@@ -38,51 +63,69 @@ import (
 
 // Response struct
 type Response struct {
-	Method     codes.Method      `json:"method"`
-	StatusCode codes.StatusCode  `json:"statusCode"`
-	Url        string            `json:"url"`
-	Host       string            `json:"host"`
-	Headers    map[string]string `json:"headers"`
-	Body       []byte            `json:"body"`
-	BodyLength uint64            `json:"bodyLength"`
+	Method      codes.Method      `json:"method"`
+	StatusCode  codes.StatusCode  `json:"statusCode"`
+	Url         string            `json:"url"`
+	Host        string            `json:"host"`
+	Headers     map[string]string `json:"headers"`
+	Body        []byte            `json:"body"`
+	BodyLength  uint64            `json:"bodyLength"`
+	RawResponse []byte            `json:"rawResponse"`
 }
 
 type ConfigResponse struct {
-	Method     codes.Method
-	StatusCode codes.StatusCode
-	Url        string
-	Host       string
-	Headers    map[string]string
-	Body       []byte
-	BodyLength uint64
+	Method      codes.Method
+	StatusCode  codes.StatusCode
+	Url         string
+	Host        string
+	Headers     map[string]string
+	Body        []byte
+	BodyLength  uint64
+	RawResponse []byte
 }
 
-// String returns a string representation of the Response struct, including
-// the URL, host, method, status code, headers, body, and body length formatted
-// in a readable manner.
+// ToString returns a string representation of the Response object, including
+// URL, host, method, status code, headers, body, and body length.
 func (r *Response) ToString() string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("Url: %s", r.Url))
-	sb.WriteString(fmt.Sprintf("\nHost: %s", r.Host))
-	sb.WriteString(fmt.Sprintf("\nMethod: %s", r.Method))
-	sb.WriteString(fmt.Sprintf("\nStatusCode: %d", r.StatusCode))
+	sb.Grow(256) // Pre-allocate memory for better performance
+
+	sb.WriteString("\nUrl: ")
+	sb.WriteString(r.Url)
+	sb.WriteString("\nHost: ")
+	sb.WriteString(r.Host)
+	sb.WriteString("\nMethod: ")
+	sb.WriteString(r.Method.String())
+	sb.WriteString("\nStatusCode: ")
+	sb.WriteString(fmt.Sprintf("%d", r.StatusCode))
 
 	sb.WriteString("\nHeaders:")
 	for key, value := range r.Headers {
-		sb.WriteString(fmt.Sprintf("\n%s: %s", key, value))
+		sb.WriteString("\n")
+		sb.WriteString(key)
+		sb.WriteString(": ")
+		sb.WriteString(value)
 	}
 
-	// Write each byte directly to prevent truncation issues
-	sb.WriteString("\nBody: ")
+	// Write the body
 	if len(r.Body) > 0 {
-		sb.Write(r.Body) // This properly handles all bytes
-	} else {
-		sb.WriteString("<empty>")
+		sb.WriteString("\nBody:")
+		sb.WriteString(r.ReadBody())
 	}
-	sb.WriteString(fmt.Sprintf("\nBodyLength: %d", r.BodyLength))
 
+	sb.WriteString(fmt.Sprintf("\nBodyLength: %d", r.BodyLength))
 	return sb.String()
+}
+
+// ReadBody returns the response body as a string.
+func (r *Response) ReadBody() string {
+	return string(r.Body)
+}
+
+// ReadRawResponse returns the raw response data as a string.
+func (r *Response) ReadRawResponse() string {
+	return string(r.RawResponse)
 }
 
 // Print prints a string representation of the Response struct to the console.
@@ -90,14 +133,97 @@ func (r *Response) Print() {
 	fmt.Println(r.ToString())
 }
 
-// ToJSON converts the Response struct into a JSON-encoded byte slice.
-// It returns an error if the encoding process fails.
-func (r *Response) ToJSON() ([]byte, error) {
-	jsonData, err := json.Marshal(r)
+// isTextContent checks if the headers indicate text content
+func isTextContent(headers map[string]string) bool {
+	contentType, exists := headers["Content-Type"]
+	if !exists {
+		return false
+	}
+
+	textTypes := []string{
+		"text/",
+		"application/json",
+		"application/xml",
+		"application/javascript",
+		"application/x-www-form-urlencoded",
+	}
+
+	for _, textType := range textTypes {
+		if strings.Contains(strings.ToLower(contentType), textType) {
+			return true
+		}
+	}
+	return false
+}
+
+// ToReadableJSON converts the Response struct to a JSON-encoded byte slice, while
+// taking care to properly encode binary data. If the response body or raw response
+// contains non-UTF8 data, it will be base64-encoded and the resulting JSON will
+// contain an "encoding" section with information about the used encoding.
+func (r *Response) ToReadableJSON() ([]byte, error) {
+
+	// Try to convert body to a readable string first
+	var bodyContent string
+	if isTextContent(r.Headers) && utf8.Valid(r.Body) {
+		bodyContent = string(r.Body)
+	} else {
+		// Fall back to base64
+		bodyContent = base64.StdEncoding.EncodeToString(r.Body)
+	}
+
+	// Try to convert rawResponse to a readable string first
+	var rawResponseContent string
+	if utf8.Valid(r.RawResponse) {
+		rawResponseContent = string(r.RawResponse)
+	} else {
+		// Fall back to base64
+		rawResponseContent = base64.StdEncoding.EncodeToString(r.RawResponse)
+	}
+
+	// Create a temporary struct to handle encoded binary data
+	tempData := struct {
+		Method      codes.Method      `json:"method"`
+		StatusCode  codes.StatusCode  `json:"statusCode"`
+		Url         string            `json:"url"`
+		Host        string            `json:"host"`
+		Headers     map[string]string `json:"headers"`
+		Body        string            `json:"body"`
+		BodyLength  uint64            `json:"bodyLength"`
+		RawResponse string            `json:"rawResponse"`
+		Encoding    struct {
+			Body        string `json:"body,omitempty"`
+			RawResponse string `json:"rawResponse,omitempty"`
+		} `json:"encoding,omitempty"`
+	}{
+		Method:      r.Method,
+		StatusCode:  r.StatusCode,
+		Url:         r.Url,
+		Host:        r.Host,
+		Headers:     r.Headers,
+		Body:        bodyContent,
+		BodyLength:  r.BodyLength,
+		RawResponse: rawResponseContent,
+	}
+
+	// Add encoding information if we used base64
+	if !utf8.Valid(r.Body) {
+		tempData.Encoding.Body = "base64"
+	}
+	if !utf8.Valid(r.RawResponse) {
+		tempData.Encoding.RawResponse = "base64"
+	}
+
+	jsonData, err := json.Marshal(tempData)
 	if err != nil {
 		return nil, err
 	}
+
 	return jsonData, nil
+}
+
+// ToJSON converts the Response struct to a JSON-encoded byte slice.
+func (r *Response) ToJSON() ([]byte, error) {
+	return json.Marshal(r)
 }
 
 // Constructors
@@ -107,12 +233,23 @@ func (r *Response) ToJSON() ([]byte, error) {
 // into a Response struct. It returns a pointer to the Response struct and a possible
 // error if the decoding fails.
 func NewResponseFromJSON(data []byte) (*Response, error) {
-	var response Response
-	err := json.Unmarshal(data, &response)
-	if err != nil {
-		return nil, err
+	if data == nil {
+		return nil, fmt.Errorf("input JSON data is nil")
 	}
-	return &response, nil
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("input JSON data is empty")
+	}
+
+	var outputResponse Response
+
+	err := json.Unmarshal(data, &outputResponse)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JSON into Response: %w", err)
+	}
+
+	return &outputResponse, nil
+
 }
 
 // NewResponse creates a new Response instance with the given parameters and
@@ -126,6 +263,7 @@ func NewResponse(
 	headers map[string]string,
 	body []byte,
 	bodyLength uint64,
+	rawResponse []byte,
 ) (*Response, error) {
 	err := codes.ValidateStatusCode(statusCode)
 	if err != nil {
@@ -145,14 +283,19 @@ func NewResponse(
 		body = []byte{}
 	}
 
+	if bodyLength == 0 {
+		bodyLength = uint64(len(body))
+	}
+
 	return &Response{
-		Method:     method,
-		StatusCode: statusCode,
-		Url:        url,
-		Host:       host,
-		Headers:    headers,
-		Body:       body,
-		BodyLength: bodyLength,
+		Method:      method,
+		StatusCode:  statusCode,
+		Url:         url,
+		Host:        host,
+		Headers:     headers,
+		Body:        body,
+		BodyLength:  bodyLength,
+		RawResponse: rawResponse,
 	}, nil
 }
 
@@ -161,7 +304,7 @@ func NewResponse(
 // be created. This function leverages the NewResponse function to perform validation and
 // initialization of the Response fields.
 func NewResponseFromConfig(config ConfigResponse) (*Response, error) {
-	return NewResponse(config.Url, config.Host, config.Method, config.StatusCode, config.Headers, config.Body, config.BodyLength)
+	return NewResponse(config.Url, config.Host, config.Method, config.StatusCode, config.Headers, config.Body, config.BodyLength, config.RawResponse)
 }
 
 // Response Pack
@@ -169,104 +312,124 @@ func NewResponseFromConfig(config ConfigResponse) (*Response, error) {
 
 // ResponsePack A struct with many Responses objects
 type ResponsePack struct {
-	Responses    sync.Map `json:"responses"`
-	Total        uint64   `json:"total"`
-	Success      uint64   `json:"success"`
-	Failure      uint64   `json:"failure"`
-	SuccessRatio float64  `json:"successRatio"`
-	FailureRatio float64  `json:"failureRatio"`
-	Info         sync.Map `json:"info"`
-	Mu           sync.RWMutex
+	Responses    map[string]map[string]*Response `json:"responses"` // map[URL][round]Response
+	Total        uint64                          `json:"total"`
+	Success      uint64                          `json:"success"`
+	Failure      uint64                          `json:"failure"`
+	SuccessRatio float64                         `json:"successRatio"`
+	FailureRatio float64                         `json:"failureRatio"`
+	Info         map[string]string               `json:"info"`
+	mu           sync.RWMutex
 }
 
-func (r *ResponsePack) GetResponse(url string) *Response {
-	// Try direct lookup first
-	value, ok := r.Responses.Load(url)
-	if ok {
-		response, _ := value.(*Response)
-		return response
+// GetResponse takes a URL and retrieves a slice of Response objects from the ResponsePack.
+// If a response does not exist for a URL, it returns nil.
+func (r *ResponsePack) GetResponse(url string) ([]*Response, error) {
+
+	// Output slice
+	var resultSlice []*Response
+	// Read Map
+	r.mu.RLock()
+	result, ok := r.Responses[url]
+	r.mu.RUnlock()
+
+	// If not found
+	if !ok {
+		return nil, fmt.Errorf("response not found for URL: %s", url)
 	}
 
-	// Try looking for URL with round suffix
-	var result *Response
-	r.Responses.Range(func(key, value interface{}) bool {
-		keyStr, ok := key.(string)
-		if !ok {
-			return true // continue
-		}
+	// Convert map to slice
+	for _, value := range result {
+		resultSlice = append(resultSlice, value)
+	}
 
-		// Check if this key is the URL with a round suffix
-		if strings.HasPrefix(keyStr, url+"--round_") || keyStr == url {
-			result = value.(*Response)
-			return false // stop iteration
-		}
-		return true // continue
-	})
-
-	return result
+	return resultSlice, nil
 }
 
-// GetIndexes takes a URL and returns a slice of all the indexes where the URL can be found in the ResponsePack.
-func (p *ResponsePack) GetIndexes(url string) []int {
-	var counter = 0
-	var sliceIndex []int
+// BatchGetResponse retrieves the Response objects associated with a given slice of URLs
+// from the ResponsePack concurrently. It handles both direct URL lookups and URLs with
+// round suffixes, returning a map where the outer key is the URL, and the inner map has
+// keys representing the round number (e.g., "round_1") and values as the Response objects.
+// The function also returns a slice of errors if any GetResponse operation fails.
+func (r *ResponsePack) BatchGetResponse(urls []string) (map[string]map[string]*Response, []error) {
+	// Output map
+	output := map[string]map[string]*Response{}
+	// Output errors
+	var errors []error
 
-	p.Mu.RLock()
-	defer p.Mu.RUnlock()
+	// Channels
+	errCh := make(chan error, len(urls))
+	resultCh := make(chan []*Response, len(urls))
 
-	p.Responses.Range(func(key, value any) bool {
-		validKey, ok := key.(string)
-		if !ok {
-			return true
+	// WaitGroup
+	var wg sync.WaitGroup
+
+	// Process each URL just once
+	for _, url := range urls {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			// Get response
+			mapRes, err := r.GetResponse(url)
+			if err != nil {
+				errCh <- err
+			}
+			if mapRes != nil {
+				resultCh <- mapRes
+			}
+		}(url)
+	}
+
+	wg.Wait()
+	close(errCh)
+	close(resultCh)
+
+	for err := range errCh {
+		errors = append(errors, err)
+	}
+
+	if len(errors) == 0 {
+		errors = nil
+	}
+
+	for result := range resultCh {
+		urlKey := result[0].Url
+		output[urlKey] = map[string]*Response{}
+
+		for index, response := range result {
+			newKey := fmt.Sprintf("round_%d", index)
+			output[urlKey][newKey] = response
 		}
+	}
 
-		if validKey == "" {
-			return true
-		}
-
-		// Extract the base URL
-		baseURL := validKey
-		if roundIndex := strings.Index(validKey, "--round_"); roundIndex >= 0 {
-			baseURL = validKey[:roundIndex]
-		}
-
-		// Compare with the requested URL
-		if baseURL == url {
-			sliceIndex = append(sliceIndex, counter)
-		}
-
-		counter++
-		return true
-	})
-	return sliceIndex
+	return output, errors
 }
 
 // GetKeysOfResponses returns a slice containing all the keys present in the Responses map of the ResponsePack.
 // It acquires a read lock on the mutex to ensure thread-safe access to the map.
 func (p *ResponsePack) GetKeysOfResponses() []string {
+	keys := make([]string, 0, len(p.Responses))
 
-	p.Mu.RLock()
-	defer p.Mu.RUnlock()
-
-	var keys []string
-
-	p.Responses.Range(func(key, value any) bool {
-		keys = append(keys, key.(string))
-		return true
-	})
+	p.mu.RLock()
+	for key := range p.Responses {
+		keys = append(keys, key)
+	}
+	p.mu.RUnlock()
 
 	return keys
 }
 
-// AddResponse adds a Response to the ResponsePack struct. It will create a new
-// inner map if the URL doesn't exist yet, or use the existing map if it does.
-// The Response is stored with the index as the key in the inner map.
+// AddResponse adds a Response object to the ResponsePack struct.
 func (p *ResponsePack) AddResponse(response *Response) error {
 	if response == nil {
 		return fmt.Errorf("response is nil")
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	ok := codes.IsSuccess(response.StatusCode)
+
 	if ok {
 		p.Success++
 	} else {
@@ -275,29 +438,71 @@ func (p *ResponsePack) AddResponse(response *Response) error {
 	p.Total++
 
 	// Recalculate ratios directly after updating metrics
-	p.Calculate()
-
-	// Handle duplicate URLs
-	origURL := response.Url
-	urlKey := origURL
-
-	// Find a unique key
-	round := 0
-	for {
-		_, exists := p.Responses.Load(urlKey)
-		if !exists {
-			break
+	if p.Total > 0 {
+		if p.Success != 0 {
+			p.SuccessRatio = float64(p.Success) / float64(p.Total)
 		}
-		round++
-		urlKey = fmt.Sprintf("%s--round_%d", origURL, round)
+		if p.Failure != 0 {
+			p.FailureRatio = float64(p.Failure) / float64(p.Total)
+		}
 	}
 
-	if urlKey != origURL {
-		responseCopy := *response // Create a copy
-		responseCopy.Url = urlKey // Update the copy's URL
-		p.Responses.Store(urlKey, &responseCopy)
-	} else {
-		p.Responses.Store(urlKey, response)
+	var round int = 0
+
+	// Check if response already exists
+	_, ok = p.Responses[response.Url]
+	// If url does not exists, create inner map
+	if !ok {
+		p.Responses[response.Url] = make(map[string]*Response)
+		p.Responses[response.Url]["round_1"] = response
+		return nil
+	}
+
+	// Get round
+	for range p.Responses[response.Url] {
+		round++
+	}
+	// Make new key
+	newKey := fmt.Sprintf("round_%d", round+1)
+	// Add response with new key
+	p.Responses[response.Url][newKey] = response
+	return nil
+}
+
+// BatchAddResponse adds a slice of Response objects to the ResponsePack struct,
+// handling duplicate URL entries by appending a round suffix.
+// It returns a slice of errors if any of the AddResponse operations fail.
+func (p *ResponsePack) BatchAddResponse(responses []*Response) []error {
+	errCh := make(chan error, len(responses))
+	errSlice := make([]error, 0)
+
+	maxWorkers := runtime.NumCPU()
+	if len(responses) < maxWorkers {
+		maxWorkers = len(responses)
+	}
+
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func(response *Response) {
+			defer wg.Done()
+			err := p.AddResponse(response)
+			if err != nil {
+				errCh <- err
+			}
+		}(responses[i])
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		errSlice = append(errSlice, err)
+	}
+
+	if len(errSlice) > 0 {
+		return errSlice
 	}
 
 	return nil
@@ -305,6 +510,8 @@ func (p *ResponsePack) AddResponse(response *Response) error {
 
 // Calculate recalculates the success and failure ratios of the ResponsePack.
 func (p *ResponsePack) Calculate() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.Total == 0 {
 		return
 	}
@@ -318,7 +525,7 @@ func (p *ResponsePack) Calculate() {
 
 // AddInfo adds a key-value pair to the info map of the ResponsePack struct.
 func (p *ResponsePack) AddInfo(key string, value string) {
-	p.Info.Store(key, value)
+	p.Info[key] = value
 }
 
 // ToString returns a string representation of the ResponsePack struct,
@@ -327,18 +534,21 @@ func (p *ResponsePack) AddInfo(key string, value string) {
 func (p *ResponsePack) ToString() string {
 
 	var str strings.Builder
+	str.Grow(256)
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
 	str.WriteString(fmt.Sprintf("Total: %d", p.Total))
 	str.WriteString(fmt.Sprintf("\nSuccess: %d", p.Success))
 	str.WriteString(fmt.Sprintf("\nFailure: %d", p.Failure))
 	str.WriteString(fmt.Sprintf("\nSuccessRatio: %f", p.SuccessRatio))
 	str.WriteString(fmt.Sprintf("\nFailureRatio: %f", p.FailureRatio))
-	str.WriteString(fmt.Sprint("\nInfo:"))
+	str.WriteString("\nInfo:")
 
-	p.Info.Range(func(key, value interface{}) bool {
-		str.WriteString(fmt.Sprintf("\n%v: %v", key, value))
-		return true
-	})
+	for key, value := range p.Info {
+		str.WriteString(fmt.Sprintf("\n\t%s: %s", key, value))
+	}
 
 	return str.String()
 }
@@ -350,12 +560,13 @@ func (p *ResponsePack) Print() {
 
 // Len returns the number of responses stored in the ResponsePack.
 func (p *ResponsePack) Len() int {
-	var counter int = 0
-	p.Responses.Range(func(key, value any) bool {
-		counter++
-		return true
-	})
-	return counter
+	if p == nil {
+		return 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return len(p.Responses)
 }
 
 // GetErrorReport returns a map of strings to strings, where each key is a URL and
@@ -367,30 +578,29 @@ func (p *ResponsePack) Len() int {
 //
 // Note: The function acquires a read lock on the ResponsePack's mutex to ensure
 // thread-safe access to the Responses map.
-func (p *ResponsePack) GetErrorReport() (map[string]string, error) {
-
-	if p.Len() == 0 {
-		return nil, fmt.Errorf("no responses found")
-	}
+func (p *ResponsePack) GetErrorReport() (map[string]map[string]*Response, error) {
 
 	if p == nil {
 		return nil, fmt.Errorf("response pack is nil")
 	}
+	if p.Len() == 0 {
+		return nil, fmt.Errorf("no responses found")
+	}
 
-	p.Mu.RLock()
-	defer p.Mu.RUnlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
-	output := make(map[string]string, p.Len())
+	output := map[string]map[string]*Response{}
 
-	p.Responses.Range(func(key, value any) bool {
-		resp := value.(*Response)
-
-		if !codes.IsSuccess(resp.StatusCode) {
-			output[key.(string)] = resp.StatusCode.String()
+	for outKey, outValue := range p.Responses {
+		for inKey, inValue := range outValue {
+			if !codes.IsSuccess(inValue.StatusCode) {
+				output[outKey] = make(map[string]*Response)
+				output[outKey][inKey] = inValue
+			}
 		}
+	}
 
-		return true
-	})
 	return output, nil
 }
 
@@ -409,7 +619,12 @@ func (p *ResponsePack) GetErrorReportString() (string, error) {
 	}
 	str.WriteString("Error Report:\n")
 	for key, value := range reportMap {
-		str.WriteString(fmt.Sprintf("%s: %s\n", key, value))
+		str.WriteString("URL: ")
+		str.WriteString(key)
+		str.WriteString("\n")
+		for inKey, inValue := range value {
+			str.WriteString(fmt.Sprintf("\t%s: %d\n", inKey, inValue.StatusCode))
+		}
 	}
 
 	return str.String(), nil
@@ -418,14 +633,14 @@ func (p *ResponsePack) GetErrorReportString() (string, error) {
 // NewResponsePack returns a new ResponsePack instance with zero values for all fields.
 func NewResponsePack() *ResponsePack {
 	return &ResponsePack{
-		Responses:    sync.Map{}, // keys: string, values: *Response
-		Info:         sync.Map{}, // keys: string, values: string
+		Responses:    map[string]map[string]*Response{}, // keys: Urls, values: map[string]Responses
+		Info:         map[string]string{},               // keys: string, values: string
 		Total:        0,
 		Success:      0,
 		Failure:      0,
 		SuccessRatio: 0,
 		FailureRatio: 0,
-		Mu:           sync.RWMutex{},
+		mu:           sync.RWMutex{},
 	}
 }
 
@@ -456,6 +671,7 @@ func responseParser(data *[]byte, url string) (*Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
+	defer httpResponse.Body.Close()
 
 	// Extract all headers into a map
 	headers := make(map[string]string)
@@ -502,6 +718,7 @@ func responseParser(data *[]byte, url string) (*Response, error) {
 		headers,
 		body,
 		uint64(len(body)),
+		*data,
 	)
 
 	if err != nil {
@@ -531,4 +748,328 @@ func ParseRawHTTPResponse(rawResponse *[]byte, url string) (*Response, error) {
 func ParseStringHTTPResponse(rawResponse string, url string) (*Response, error) {
 	data := []byte(rawResponse)
 	return responseParser(&data, url)
+}
+
+// Compress and Decompress Response
+// ----------------------------------------------------------------------
+
+// Compress takes the Response object and compresses it using Gzip.
+// The function will first convert the Response object to a JSON byte slice
+// using the ToJSON method, and then use the standard library's gzip package
+// to write the JSON data into a bytes.Buffer. The function returns the
+// compressed data as a byte slice, and an error if either the ToJSON or
+// gzip.Write operation fails.
+func (r *Response) Compress() ([]byte, error) {
+	jsonData, err := r.ToJSON()
+	if err != nil {
+		return nil, err
+	}
+	var compressedData bytes.Buffer
+	gz := gzip.NewWriter(&compressedData)
+	_, err = gz.Write(jsonData)
+	if err != nil {
+		return nil, err
+	}
+	err = gz.Close()
+	if err != nil {
+		return nil, err
+	}
+	return compressedData.Bytes(), nil
+}
+
+// NewResponseFromCompressed creates a Response from compressed data
+func NewResponseFromCompressed(compressedData []byte) (*Response, error) {
+	// Create a reader for the compressed data
+	r, err := gzip.NewReader(bytes.NewReader(compressedData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer r.Close()
+
+	// Read the decompressed data
+	jsonData, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress data: %w", err)
+	}
+
+	// Unmarshal the JSON data
+	var response Response
+	if err := json.Unmarshal(jsonData, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	return &response, nil
+}
+
+// CompressResponsePack
+// ----------------------------------------------------------------------
+
+type CompressResponsePack struct {
+	CompressedResponses map[string]map[string][]byte
+	MetaInfo            map[string]string
+	mu                  sync.RWMutex
+}
+
+// NewCompressResponsePack creates a new CompressResponsePack, initializing the CompressedResponses sync.Map.
+func NewCompressResponsePack() *CompressResponsePack {
+	return &CompressResponsePack{
+		CompressedResponses: make(map[string]map[string][]byte),
+		MetaInfo:            make(map[string]string),
+		mu:                  sync.RWMutex{},
+	}
+}
+
+// AddResponse compresses the given Response object and adds it to the CompressedResponses map,
+// handling duplicate URL entries by appending a round suffix. It returns an error if compression fails.
+func (r *CompressResponsePack) AddResponse(response *Response) error {
+
+	if response == nil {
+		return fmt.Errorf("response is nil")
+	}
+
+	if r == nil {
+		return fmt.Errorf("response pack is nil")
+	}
+
+	compressedData, err := response.Compress()
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Check if the URL already exists in the map
+	_, ok := r.CompressedResponses[response.Url]
+
+	if !ok {
+		// If not, create a new map for the URL
+		r.CompressedResponses[response.Url] = map[string][]byte{}
+		r.CompressedResponses[response.Url]["round_1"] = compressedData
+		return nil
+	}
+
+	// If the URL already exists, append a round suffix
+	var round int = 0
+	for range r.CompressedResponses[response.Url] {
+		round++
+	}
+	r.CompressedResponses[response.Url][fmt.Sprintf("round_%d", round+1)] = compressedData
+
+	return nil
+}
+
+// BatchAddResponse adds a slice of Response objects to the CompressResponsePack, compressing each one and handling duplicate URL entries by appending a round suffix.
+// It returns a slice of errors if any of the AddResponse operations fail.
+func (r *CompressResponsePack) BatchAddResponse(responses []*Response) []error {
+	errCh := make(chan error, len(responses))
+	errSlice := make([]error, 0)
+	wg := sync.WaitGroup{}
+	maxWorkers := runtime.NumCPU()
+
+	if len(responses) < maxWorkers {
+		maxWorkers = len(responses)
+	}
+
+	responseCh := make(chan *Response, len(responses))
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for response := range responseCh {
+				err := r.AddResponse(response)
+				if err != nil {
+					errCh <- err
+				}
+			}
+		}()
+	}
+
+	// Send work to workers
+	for _, response := range responses {
+		responseCh <- response
+	}
+
+	close(responseCh)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		errSlice = append(errSlice, err)
+	}
+
+	if len(errSlice) > 0 {
+		return errSlice
+	}
+
+	return nil
+}
+
+// GetResponseCount returns the total number of responses stored in the CompressedResponses map.
+func (r *CompressResponsePack) GetResponseCount() int {
+	var counter int = 0
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, outValue := range r.CompressedResponses {
+		counter += len(outValue)
+	}
+	return counter
+}
+
+// GetResponse takes a URL and retrieves a Response from the CompressedResponses map.
+// The function handles both direct lookups and URLs with round suffixes.
+// It returns the Response object and an error if the response is not found or if decompression fails.
+func (r *CompressResponsePack) GetResponse(url string) ([]*Response, error) {
+	// Find compressed data
+
+	r.mu.RLock()
+	responses, ok := r.CompressedResponses[url]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("response not found for URL: %s", url)
+	}
+	var responseSlice []*Response
+
+	for _, value := range responses {
+		// Decompress
+		response, err := NewResponseFromCompressed(value)
+		if err != nil {
+			return nil, err
+		}
+		responseSlice = append(responseSlice, response)
+	}
+	return responseSlice, nil
+}
+
+// BatchGetResponse takes a slice of URLs and retrieves the corresponding
+// Response objects from the CompressResponsePack concurrently. It handles
+// both direct lookups and URLs with round suffixes. The function returns a
+// map of maps, where the outer key is the URL and the inner key is the round
+// number and the value is the Response object. The function also returns a
+// slice of errors if any of the GetResponse operations fail.
+func (r *CompressResponsePack) BatchGetResponse(urls []string) (map[string]map[string]*Response, []error) {
+	errCh := make(chan error, len(urls))
+	respCh := make(chan []*Response, len(urls))
+	errSlice := make([]error, 0)
+
+	wg := sync.WaitGroup{}
+
+	for _, url := range urls {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			resp, err := r.GetResponse(url)
+			if err != nil {
+				errCh <- err
+			} else if resp != nil {
+				respCh <- resp
+			}
+		}(url)
+	}
+
+	wg.Wait()
+	close(errCh)
+	close(respCh)
+
+	for err := range errCh {
+		errSlice = append(errSlice, err)
+	}
+
+	if len(errSlice) > 0 {
+		return nil, errSlice
+	}
+
+	responses := make(map[string]map[string]*Response)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for resp := range respCh {
+		for index, response := range resp {
+			responses[response.Url] = make(map[string]*Response)
+			newKey := fmt.Sprintf("round_%d", index+1)
+			responses[response.Url][newKey] = response
+		}
+	}
+	return responses, nil
+}
+
+// DeleteResponse takes a URL and removes the corresponding Responses from the
+// CompressedResponses map. If a response does not exist for a URL, it returns an
+// error. The function also resets the CompressedResponses map to an empty map if
+// no responses remain after deletion.
+func (r *CompressResponsePack) DeleteResponse(url string) error {
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, ok := r.CompressedResponses[url]
+	if !ok {
+		return fmt.Errorf("response not found for URL: %s", url)
+	}
+	delete(r.CompressedResponses, url)
+	if len(r.CompressedResponses) == 0 {
+		r.CompressedResponses = make(map[string]map[string][]byte)
+	}
+	return nil
+}
+
+// BatchDeleteResponse takes a slice of URLs and removes the corresponding
+// Responses from the CompressedResponses map concurrently. If a response
+// does not exist for a URL, it returns an error. The function returns a
+// slice of errors for any failed delete operations.
+func (r *CompressResponsePack) BatchDeleteResponse(urls []string) []error {
+	errCh := make(chan error, len(urls))
+	errSlice := make([]error, 0)
+	wg := sync.WaitGroup{}
+
+	for _, url := range urls {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			err := r.DeleteResponse(url)
+			if err != nil {
+				errCh <- err
+			}
+		}(url)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		errSlice = append(errSlice, err)
+	}
+
+	if len(errSlice) > 0 {
+		return errSlice
+	}
+
+	return nil
+}
+
+// AddInfo adds a key-value pair to the info map of the CompressResponsePack struct.
+func (r *CompressResponsePack) AddInfo(key string, value string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.MetaInfo[key] = value
+}
+
+// AddInfoFromMap adds all key-value pairs from the given map to the info map
+// of the CompressResponsePack struct.
+func (r *CompressResponsePack) AddInfoFromMap(info map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, value := range info {
+		r.MetaInfo[key] = value
+	}
+}
+
+// Clear resets the CompressedResponses map to an empty sync.Map, effectively clearing
+// out all the stored responses. This is useful when you want to clear out all the
+// responses after they have been processed.
+func (r *CompressResponsePack) Clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.CompressedResponses = map[string]map[string][]byte{}
 }
