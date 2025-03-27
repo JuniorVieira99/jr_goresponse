@@ -1,4 +1,4 @@
-name: Response Pack Test
+name: Race Conditions Test
 
 on:
   push:
@@ -23,4 +23,4 @@ jobs:
           go-version: ${{ matrix.go-version }}
 
       - name: Run response tests
-        run: go test ./tests/response_pack_test.go
+        run: go test -race ./tests

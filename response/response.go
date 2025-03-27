@@ -339,10 +339,12 @@ func (r *ResponsePack) GetResponse(url string) ([]*Response, error) {
 
 	// Output slice
 	var resultSlice []*Response
+
 	// Read Map
 	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	result, ok := r.Responses[url]
-	r.mu.RUnlock()
 
 	// If not found
 	if !ok {
@@ -403,6 +405,8 @@ func (r *ResponsePack) BatchGetResponse(urls []string) (map[string]map[string]*R
 		errors = nil
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for result := range resultCh {
 		urlKey := result[0].Url
 		output[urlKey] = map[string]*Response{}
@@ -419,13 +423,13 @@ func (r *ResponsePack) BatchGetResponse(urls []string) (map[string]map[string]*R
 // GetKeysOfResponses returns a slice containing all the keys present in the Responses map of the ResponsePack.
 // It acquires a read lock on the mutex to ensure thread-safe access to the map.
 func (p *ResponsePack) GetKeysOfResponses() []string {
-	keys := make([]string, 0, len(p.Responses))
-
 	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	keys := make([]string, 0, len(p.Responses))
 	for key := range p.Responses {
 		keys = append(keys, key)
 	}
-	p.mu.RUnlock()
 
 	return keys
 }
