@@ -20,7 +20,7 @@ A comprehensive Go library for handling HTTP responses in a structured and threa
 ## Installation
 
 ```bash
-go get github.com/JuniorVieira99/response_lib
+go get github.com/JuniorVieira99/jr_goresponse
 ```
 
 ## Dependencies
